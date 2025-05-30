@@ -1,9 +1,16 @@
 package com.example.travellogin
-
+import android.content.SharedPreferences
+import android.hardware.biometrics.BiometricManager
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
+import android.util.Patterns
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.annotation.RequiresApi
+import androidx.biometric.BiometricPrompt
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExperimentalAnimationApi
@@ -56,40 +63,152 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.navigation.NavController
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.example.travellogin.ui.theme.TravelLoginTheme
+import com.google.firebase.auth.FirebaseAuth
+import java.util.regex.Pattern
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
+    private lateinit var firebaseAuth : FirebaseAuth
+    private lateinit var sharedPreferences: SharedPreferences
+    private lateinit var editor : SharedPreferences.Editor
+    @RequiresApi(Build.VERSION_CODES.P)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        firebaseAuth = FirebaseAuth.getInstance()
+        sharedPreferences = this.getSharedPreferences("sharedPref", MODE_PRIVATE)
+        editor = sharedPreferences.edit()
         setContent {
             val controller = rememberNavController()
             TravelLoginTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    NavHost(controller, startDestination = "onboarding", Modifier.fillMaxSize() ){
+                    var isAuthenticated by remember { mutableStateOf(true) }
+                    NavHost(controller, startDestination = if(firebaseAuth.currentUser?.uid!=null) "home" else "onboarding", Modifier.fillMaxSize() ){
                         composable("onboarding") {
+
+                            var email = sharedPreferences.getString("email", null)
+                            var password = sharedPreferences.getString("password", null)
+                            if(email !=null && password !=null){
+                                    val biometricManager = androidx.biometric.BiometricManager.from(this@MainActivity)
+                                    val promptInfo = androidx.biometric.BiometricPrompt.PromptInfo.Builder()
+                                        .setTitle("Continue ${email}")
+                                        .setSubtitle("Use FingerPrint to proceed")
+                                        .setNegativeButtonText("Cancel")
+                                        .build()
+
+                                val executer = ContextCompat.getMainExecutor(this@MainActivity)
+                                val biometricPrompt = androidx.biometric.BiometricPrompt(
+                                    this@MainActivity as FragmentActivity,
+                                    executer,
+                                    object : BiometricPrompt.AuthenticationCallback() {
+                                        override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                                            login(email, password, controller)
+                                            sendToast("login successfull")
+                                            super.onAuthenticationSucceeded(result)
+                                        }
+
+                                        override fun onAuthenticationFailed() {
+                                            super.onAuthenticationFailed()
+                                            sendToast("failure of authentication")
+                                        }
+                                    }
+                                )
+                                when(biometricManager.canAuthenticate()){
+                                    androidx.biometric.BiometricManager.BIOMETRIC_SUCCESS->{
+                                        if(isAuthenticated){
+                                             biometricPrompt.authenticate(promptInfo)
+                                            isAuthenticated = false
+                                        }
+                                    }
+                                    androidx.biometric.BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE->{
+                                        sendToast("NO HARDWARE")
+                                    }
+
+                                }
+                            }
                             Onboarding(controller)
+
                         }
                         composable("login"){
-                            LoginScreen(controller)
+                            LoginScreen(controller){email,pasword->
+                                login(email,pasword,controller)
+                            }
                         }
                         composable("signup"){
-                            SignUpScreen(controller)
+                            SignUpScreen(controller){email,password->
+                                signup(email,password,controller)
+                            }
+                        }
+                        composable ("home") {
+                            HomePage(){
+                                logout(controller)
+                            }
                         }
                     }
 
                 }
             }
         }
+    }
+    fun signup(email: String, password: String, controller: NavHostController){
+        if(validation(email,password)) {
+            firebaseAuth.createUserWithEmailAndPassword(email, password)
+                .addOnSuccessListener {
+                    sendToast("sign up successfully")
+                    editor.putString("email", email)
+                    editor.putString("password", password)
+                    editor.apply()
+                    controller.navigate("home")
+                }
+                .addOnFailureListener {
+                    sendToast("Logged in Failure ${it}")
+                }
+        }
+    }
+    fun login(email: String, password: String, controller: NavHostController){
+        if(validation(email,password)){
+        firebaseAuth.signInWithEmailAndPassword(email,password)
+            .addOnSuccessListener {
+                sendToast("Logged in successfully")
+                editor.putString("email", email)
+                editor.putString("password", password)
+                editor.apply()
+                controller.navigate("home")
+            }
+            .addOnFailureListener {
+                sendToast("Logged in Failure ${it}")
+
+            }}
+    }
+    fun logout(controller: NavController){
+        firebaseAuth.signOut()
+        controller.navigate("onboarding")
+    }
+    fun validation( email: String , password :String ) : Boolean{
+        val p :Pattern  = Patterns.EMAIL_ADDRESS
+        val isValidEmail = p.matcher(email).matches()
+            if(!isValidEmail){
+               sendToast("Enter the invalid email")
+                return false
+            }
+        if(password.length < 8) {
+            sendToast("Enter password of size atleast 8")
+            return false
+        }
+        return (isValidEmail && password.length>=8)
+    }
+    fun sendToast(msg : String){
+        Toast.makeText(applicationContext, msg, Toast.LENGTH_SHORT).show()
     }
 }
 @OptIn(ExperimentalAnimationApi::class)
@@ -159,8 +278,10 @@ fun Onboarding(controller: NavController){
 
 
 @Composable
-fun SignUpScreen(controller: NavHostController) {
+fun SignUpScreen(controller: NavHostController, onSignUpClick:(String, String)->Unit) {
     var passwordVisibility  by remember{mutableStateOf(false)}
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     Column (Modifier
         .fillMaxSize()
         .padding(vertical = 50.dp, horizontal = 20.dp),
@@ -206,9 +327,9 @@ fun SignUpScreen(controller: NavHostController) {
             )
         )
         OutlinedTextField(
-            "",
+            email,
             onValueChange = {
-
+                email =it
             },
             Modifier
                 .padding(top = 10.dp)
@@ -256,9 +377,9 @@ fun SignUpScreen(controller: NavHostController) {
             )
         )
         OutlinedTextField(
-            "",
+            password,
             onValueChange = {
-
+                password  = it
             },
             Modifier
                 .padding(top = 10.dp)
@@ -304,7 +425,13 @@ fun SignUpScreen(controller: NavHostController) {
                 .padding(top = 20.dp)
                 .height(50.dp)
                 .wrapContentWidth()
-                .background(Color.Black, RoundedCornerShape(20.dp)),
+                .background(Color.Black, RoundedCornerShape(20.dp))
+                .clickable{
+                    onSignUpClick(email, password)
+                    email = ""
+                    password = ""
+                }
+            ,
             contentAlignment = Alignment.Center
         ){
             Text("DONE", Modifier
@@ -325,8 +452,10 @@ fun SignUpScreen(controller: NavHostController) {
 }
 
 @Composable
-fun LoginScreen(controller: NavHostController) {
+fun LoginScreen(controller: NavHostController, onLogin:(String,String)->Unit) {
     var passwordVisibility  by remember{mutableStateOf(false)}
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
     Column (Modifier
         .fillMaxSize()
         .padding(vertical = 50.dp, horizontal = 20.dp),
@@ -347,9 +476,9 @@ fun LoginScreen(controller: NavHostController) {
             fontSize = 18.sp,
         )
         OutlinedTextField(
-            "",
+            email,
             onValueChange = {
-                
+                email = it
             },
             Modifier
                 .padding(top = 30.dp)
@@ -372,9 +501,9 @@ fun LoginScreen(controller: NavHostController) {
             )
         )
         OutlinedTextField(
-            "",
+            password,
             onValueChange = {
-
+                password = it
             },
             Modifier
                 .padding(top = 10.dp)
@@ -451,7 +580,12 @@ fun LoginScreen(controller: NavHostController) {
                 .padding(top = 20.dp)
                 .height(50.dp)
                 .wrapContentWidth()
-                .background(Color.Black, RoundedCornerShape(20.dp)),
+                .background(Color.Black, RoundedCornerShape(20.dp))
+                .clickable{
+                    onLogin(email, password)
+                    email = ""
+                    password = ""
+                },
             contentAlignment = Alignment.Center
         ){
             Text("DONE", Modifier
@@ -471,6 +605,41 @@ fun LoginScreen(controller: NavHostController) {
     }
 
 
+@Composable
+fun HomePage(logout:()->Unit){
+    Column (Modifier
+        .fillMaxSize()
+        .padding(vertical = 50.dp, horizontal = 20.dp),
+        horizontalAlignment  = Alignment.CenterHorizontally) {
+        Text(
+            "Welcome To Home", Modifier.padding(top = 30.dp),
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 40.sp
+        )
+        Image(
+            painter = painterResource(R.drawable.home),
+            contentDescription = null,
+            Modifier.size(350.dp, 400.dp)
+        )
+        Box(
+            Modifier
+                .padding(top = 100.dp)
+                .height(50.dp)
+                .wrapContentWidth()
+                .background(Color.Black, RoundedCornerShape(20.dp))
+                .clickable{
+                    logout()
+                },
+            contentAlignment = Alignment.Center
+        ){
+            Text("LOGOUT", Modifier
+                .padding(horizontal = 100.dp, vertical = 10.dp),
+                fontSize = 18.sp,
+                color  = Color.White, fontWeight = FontWeight.Bold)
+        }
+
+    }
+}
 
 
 @Composable
@@ -506,6 +675,8 @@ fun Progress(index : Int){
         }
     }
 }
+
+
 
 
 data class OnboardingItem(
